@@ -9,6 +9,8 @@ endif()
 
 set(CMAKE_TOOLCHAIN_FILE ${CMAKE_SOURCE_DIR}/cmake/toolchains/Toolchain-arm-linux-gnueabihf.cmake)
 
+set(config_generate_parameters_scope ALL)
+
 set(config_module_list
 	drivers/device
 	drivers/boards/sitl
@@ -25,6 +27,7 @@ set(config_module_list
 	modules/sensors
 	modules/dataman
 	modules/sdlog2
+	modules/logger
 	modules/simulator
 	modules/commander
 
@@ -33,6 +36,7 @@ set(config_module_list
 	lib/geo
 	lib/geo_lookup
 	lib/conversion
+	lib/DriverFramework/framework
 
 	platforms/common
 	platforms/posix/px4_layer

@@ -48,7 +48,8 @@ class DeviceMaster;
 class uORB::DeviceNode : public device::VDev
 {
 public:
-	DeviceNode(const struct orb_metadata *meta, const char *name, const char *path, int priority);
+	DeviceNode(const struct orb_metadata *meta, const char *name, const char *path,
+		   int priority, unsigned int queue_size = 1);
 	~DeviceNode();
 
 	virtual int   open(device::file_t *filp);
@@ -58,6 +59,8 @@ public:
 	virtual int   ioctl(device::file_t *filp, int cmd, unsigned long arg);
 
 	static ssize_t    publish(const orb_metadata *meta, orb_advert_t handle, const void *data);
+
+	static int        unadvertise(orb_advert_t handle);
 
 	/**
 	 * processes a request for add subscription from remote
@@ -103,30 +106,50 @@ public:
 	 * and publish to this node or if another node should be tried. */
 	bool is_published();
 
+	/**
+	 * Try to change the size of the queue. This can only be done as long as nobody published yet.
+	 * This is the case, for example when orb_subscribe was called before an orb_advertise.
+	 * The queue size can only be increased.
+	 * @param queue_size new size of the queue
+	 * @return PX4_OK if queue size successfully set
+	 */
+	int update_queue_size(unsigned int queue_size);
+
 protected:
 	virtual pollevent_t poll_state(device::file_t *filp);
 	virtual void    poll_notify_one(px4_pollfd_struct_t *fds, pollevent_t events);
 
 private:
-	struct SubscriberData {
-		unsigned  generation; /**< last generation the subscriber has seen */
-		unsigned  update_interval; /**< if nonzero minimum interval between updates */
+	struct UpdateIntervalData {
+		unsigned  interval; /**< if nonzero minimum interval between updates */
 		uint64_t last_update; /**< time at which the last update was provided, used when update_interval is nonzero */
 		struct hrt_call update_call;  /**< deferred wakeup call if update_period is nonzero */
-		void    *poll_priv; /**< saved copy of fds->f_priv while poll is active */
-		bool    update_reported; /**< true if we have reported the update via poll/check */
-		int   priority; /**< priority of publisher */
+	};
+	struct SubscriberData {
+		~SubscriberData() { if (update_interval) { delete(update_interval); } }
+
+		unsigned  generation; /**< last generation the subscriber has seen */
+		int   flags; /**< lowest 8 bits: priority of publisher, 9. bit: update_reported bit */
+		UpdateIntervalData *update_interval; /**< if null, no update interval */
+
+		int priority() const { return flags & 0xff; }
+		void set_priority(uint8_t prio) { flags = (flags & ~0xff) | prio; }
+
+		bool update_reported() const { return flags & (1 << 8); }
+		void set_update_reported(bool update_reported_flag) { flags = (flags & ~(1 << 8)) | (((int)update_reported_flag) << 8); }
 	};
 
 	const struct orb_metadata *_meta; /**< object metadata information */
 	uint8_t     *_data;   /**< allocated object buffer */
 	hrt_abstime   _last_update; /**< time the object was last updated */
 	volatile unsigned   _generation;  /**< object generation count */
-	unsigned long     _publisher; /**< if nonzero, current publisher */
+	unsigned long     _publisher; /**< if nonzero, current publisher. Only used inside the advertise call.
+					We allow one publisher to have an open file descriptor at the same time. */
 	const int   _priority;  /**< priority of topic */
 	bool _published;  /**< has ever data been published */
+	unsigned int _queue_size; /**< maximum number of elements in the queue */
 
-	SubscriberData    *filp_to_sd(device::file_t *filp);
+	static SubscriberData    *filp_to_sd(device::file_t *filp);
 
 	int32_t _subscriber_count;
 
@@ -144,6 +167,8 @@ private:
 
 	/**
 	 * Check whether a topic appears updated to a subscriber.
+	 *
+	 * Lock must already be held when calling this.
 	 *
 	 * @param sd    The subscriber for whom to check.
 	 * @return    True if the topic should appear updated to the subscriber
@@ -166,13 +191,13 @@ class uORB::DeviceMaster : public device::VDev
 {
 public:
 	DeviceMaster(Flavor f);
-	~DeviceMaster();
+	virtual ~DeviceMaster();
 
 	static uORB::DeviceNode *GetDeviceNode(const char *node_name);
 
 	virtual int   ioctl(device::file_t *filp, int cmd, unsigned long arg);
 private:
-	Flavor      _flavor;
+	const Flavor      _flavor;
 	static std::map<std::string, uORB::DeviceNode *> _node_map;
 };
 
