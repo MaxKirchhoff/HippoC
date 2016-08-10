@@ -1,4 +1,3 @@
-comment From rcS_gazebo_iris
 uorb start
 param load
 param set MAV_TYPE 2
@@ -10,8 +9,6 @@ simulator start -s
 
 pwm_out_sim mode_pwm
 mixer load /dev/pwm_output0 ../../../../ROMFS/px4fmu_common/mixers/uuv_quad_x.mix
-comment mixer load /dev/pwm_output0 ../../../../ROMFS/px4fmu_common/mixers/FMU_pass.mix
-
 
 gyrosim start
 accelsim start
