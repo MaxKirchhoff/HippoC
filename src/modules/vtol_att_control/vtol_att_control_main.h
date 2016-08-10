@@ -84,6 +84,7 @@
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/tecs_status.h>
 #include <uORB/topics/vehicle_land_detected.h>
+#include <uORB/topics/control_state.h>
 #include <systemlib/param/param.h>
 #include <systemlib/err.h>
 #include <systemlib/systemlib.h>
@@ -109,7 +110,7 @@ public:
 
 	int start();	/* start the task and return OK on success */
 	bool is_fixed_wing_requested();
-	void abort_front_transition();
+	void abort_front_transition(const char *reason);
 
 	struct vehicle_attitude_s 			*get_att() {return &_v_att;}
 	struct vehicle_attitude_setpoint_s		*get_att_sp() {return &_v_att_sp;}
@@ -209,6 +210,7 @@ private:
 		param_t arsp_lp_gain;
 		param_t vtol_type;
 		param_t elevons_mc_lock;
+		param_t fw_min_alt;
 	} _params_handles;
 
 	/* for multicopters it is usual to have a non-zero idle speed of the engines

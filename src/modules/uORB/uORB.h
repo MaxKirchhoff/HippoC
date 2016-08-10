@@ -200,7 +200,7 @@ extern int	orb_unsubscribe(int handle) __EXPORT;
 extern int	orb_copy(const struct orb_metadata *meta, int handle, void *buffer) __EXPORT;
 
 /**
- * @see uORB::Manager::orb_advertise()
+ * @see uORB::Manager::orb_check()
  */
 extern int	orb_check(int handle, bool *updated) __EXPORT;
 
@@ -231,6 +231,11 @@ extern int	orb_priority(int handle, int32_t *priority) __EXPORT;
  * @see uORB::Manager::orb_set_interval()
  */
 extern int	orb_set_interval(int handle, unsigned interval) __EXPORT;
+
+/**
+ * @see uORB::Manager::orb_get_interval()
+ */
+extern int	orb_get_interval(int handle, unsigned *interval) __EXPORT;
 
 __END_DECLS
 
