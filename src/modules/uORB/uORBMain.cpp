@@ -36,6 +36,7 @@
 #include "uORBManager.hpp"
 #include "uORB.h"
 #include "uORBCommon.hpp"
+#include <px4_log.h>
 
 extern "C" { __EXPORT int uorb_main(int argc, char *argv[]); }
 
@@ -72,19 +73,18 @@ uorb_main(int argc, char *argv[])
 		}
 
 		/* create the driver */
-		g_dev = new uORB::DeviceMaster(uORB::PUBSUB);
+		g_dev = uORB::Manager::get_instance()->get_device_master(uORB::PUBSUB);
 
 		if (g_dev == nullptr) {
-			PX4_ERR("driver alloc failed");
-			return -ENOMEM;
+			return -errno;
 		}
 
-		if (OK != g_dev->init()) {
-			PX4_ERR("driver init failed");
-			delete g_dev;
-			g_dev = nullptr;
-			return -EIO;
-		}
+#if !defined(__PX4_QURT) && !defined(__PX4_POSIX_EAGLE)
+		/* FIXME: this fails on Snapdragon (see https://github.com/PX4/Firmware/issues/5406),
+		 * so we disable logging messages to the ulog for now. This needs further investigations.
+		 */
+		px4_log_initialize();
+#endif
 
 		return OK;
 	}
@@ -94,7 +94,7 @@ uorb_main(int argc, char *argv[])
 	 */
 	if (!strcmp(argv[1], "status")) {
 		if (g_dev != nullptr) {
-			PX4_INFO("uorb is running");
+			g_dev->printStatistics(true);
 
 		} else {
 			PX4_INFO("uorb is not running");

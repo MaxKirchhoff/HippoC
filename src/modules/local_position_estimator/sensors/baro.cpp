@@ -29,8 +29,7 @@ void BlockLocalPositionEstimator::baroInit()
 		_baroInitialized = true;
 		_baroFault = FAULT_NONE;
 
-		// only initialize alt origin with baro and no gps
-		if (!_altOriginInitialized && !_gps_on.get()) {
+		if (!_altOriginInitialized) {
 			_altOriginInitialized = true;
 			_altOrigin = _baroAltOrigin;
 		}
@@ -76,8 +75,11 @@ void BlockLocalPositionEstimator::baroCorrect()
 
 	if (beta > BETA_TABLE[n_y_baro]) {
 		if (_baroFault < FAULT_MINOR) {
-			mavlink_and_console_log_info(&mavlink_log_pub, "[lpe] baro fault, r %5.2f m, beta %5.2f",
-						     double(r(0)), double(beta));
+			if (beta > 2.0f * BETA_TABLE[n_y_baro]) {
+				mavlink_and_console_log_critical(&mavlink_log_pub, "[lpe] baro fault, r %5.2f m, beta %5.2f",
+								 double(r(0)), double(beta));
+			}
+
 			_baroFault = FAULT_MINOR;
 		}
 

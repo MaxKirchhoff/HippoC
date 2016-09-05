@@ -155,7 +155,7 @@ private:
 	 * @param interval the interval in us to send the message at
 	 * @param data_rate the total link data rate in bytes per second
 	 */
-	void set_message_interval(int msgId, float interval, int data_rate=-1);
+	void set_message_interval(int msgId, float interval, int data_rate = -1);
 	void get_message_interval(int msgId);
 
 	/**
@@ -218,9 +218,8 @@ private:
 	orb_advert_t _time_offset_pub;
 	orb_advert_t _follow_target_pub;
 	orb_advert_t _transponder_report_pub;
-	static const int _gps_inject_data_pub_size = 4;
-	orb_advert_t _gps_inject_data_pub[_gps_inject_data_pub_size];
-	int _gps_inject_data_next_idx = 0;
+	static const int _gps_inject_data_queue_size = 6;
+	orb_advert_t _gps_inject_data_pub;
 	int _control_mode_sub;
 	int _hil_frames;
 	uint64_t _old_timestamp;

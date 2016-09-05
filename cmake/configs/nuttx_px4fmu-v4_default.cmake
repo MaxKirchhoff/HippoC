@@ -1,6 +1,6 @@
 include(nuttx/px4_impl_nuttx)
 
-set(CMAKE_TOOLCHAIN_FILE ${CMAKE_SOURCE_DIR}/cmake/toolchains/Toolchain-arm-none-eabi.cmake)
+set(CMAKE_TOOLCHAIN_FILE ${PX4_SOURCE_DIR}/cmake/toolchains/Toolchain-arm-none-eabi.cmake)
 
 set(config_uavcan_num_ifaces 1)
 
@@ -23,7 +23,7 @@ set(config_module_list
 	drivers/mb12xx
 	drivers/srf02
 	drivers/sf0x
-	drivers/sf10a
+	drivers/sf1xx
 	drivers/ll40ls
 	drivers/trone
 	drivers/gps
@@ -98,7 +98,6 @@ set(config_module_list
 	# Estimation modules (EKF/ SO3 / other filters)
 	#
 	modules/attitude_estimator_q
-	modules/ekf_att_pos_estimator
 	modules/position_estimator_inav
 	modules/ekf2
 	modules/local_position_estimator
@@ -183,6 +182,9 @@ set(config_module_list
 
 	# Hardware test
 	#examples/hwtest
+
+	# EKF
+	examples/ekf_att_pos_estimator
 )
 
 set(config_extra_builtin_cmds
@@ -202,10 +204,12 @@ add_custom_target(sercon)
 set_target_properties(sercon PROPERTIES
 	PRIORITY "SCHED_PRIORITY_DEFAULT"
 	MAIN "sercon"
-	STACK_MAIN "2048")
+	STACK_MAIN "2048"
+	COMPILE_FLAGS "-Os")
 
 add_custom_target(serdis)
 set_target_properties(serdis PROPERTIES
 	PRIORITY "SCHED_PRIORITY_DEFAULT"
 	MAIN "serdis"
-	STACK_MAIN "2048")
+	STACK_MAIN "2048"
+	COMPILE_FLAGS "-Os")

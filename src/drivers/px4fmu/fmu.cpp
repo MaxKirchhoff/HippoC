@@ -405,6 +405,8 @@ PX4FMU::init()
 		return ret;
 	}
 
+	// XXX best would be to register / de-register the device depending on modes
+
 	/* try to claim the generic PWM output device node as well - it's OK if we fail at this */
 	_class_instance = register_class_devname(PWM_OUTPUT_BASE_DEVICE_PATH);
 
@@ -422,7 +424,7 @@ PX4FMU::init()
 }
 
 void
-PX4FMU:: safety_check_button(void)
+PX4FMU::safety_check_button(void)
 {
 #ifdef GPIO_BTN_SAFETY
 	static int counter = 0;
@@ -859,10 +861,14 @@ void PX4FMU::rc_io_invert(bool invert)
 {
 	INVERT_RC_INPUT(invert);
 
+#ifdef GPIO_RC_OUT
+
 	if (!invert) {
 		// set FMU_RC_OUTPUT high to pull RC_INPUT up
 		px4_arch_gpiowrite(GPIO_RC_OUT, 1);
 	}
+
+#endif
 }
 #endif
 
@@ -903,12 +909,20 @@ PX4FMU::cycle()
 		update_pwm_rev_mask();
 
 #ifdef RC_SERIAL_PORT
+
+#ifdef RF_RADIO_POWER_CONTROL
+		// power radio on
+		RF_RADIO_POWER_CONTROL(true);
+#endif
+
 		// dsm_init sets some file static variables and returns a file descriptor
 		_rcs_fd = dsm_init(RC_SERIAL_PORT);
 		// assume SBUS input
 		sbus_config(_rcs_fd, false);
+#ifdef GPIO_PPM_IN
 		// disable CPPM input by mapping it away from the timer capture input
 		px4_arch_unconfiggpio(GPIO_PPM_IN);
+#endif
 #endif
 
 		_initialized = true;
@@ -1614,10 +1628,18 @@ PX4FMU::pwm_ioctl(file *filp, int cmd, unsigned long arg)
 				} else if (pwm->values[i] > PWM_HIGHEST_MAX) {
 					_failsafe_pwm[i] = PWM_HIGHEST_MAX;
 
-				} else if (pwm->values[i] < PWM_LOWEST_MIN) {
+				}
+
+#if PWM_LOWEST_MIN > 0
+
+				else if (pwm->values[i] < PWM_LOWEST_MIN) {
 					_failsafe_pwm[i] = PWM_LOWEST_MIN;
 
-				} else {
+				}
+
+#endif
+
+				else {
 					_failsafe_pwm[i] = pwm->values[i];
 				}
 			}
@@ -1662,11 +1684,17 @@ PX4FMU::pwm_ioctl(file *filp, int cmd, unsigned long arg)
 					/* ignore 0 */
 				} else if (pwm->values[i] > PWM_HIGHEST_MAX) {
 					_disarmed_pwm[i] = PWM_HIGHEST_MAX;
+				}
 
-				} else if (pwm->values[i] < PWM_LOWEST_MIN) {
+#if PWM_LOWEST_MIN > 0
+
+				else if (pwm->values[i] < PWM_LOWEST_MIN) {
 					_disarmed_pwm[i] = PWM_LOWEST_MIN;
+				}
 
-				} else {
+#endif
+
+				else {
 					_disarmed_pwm[i] = pwm->values[i];
 				}
 			}
@@ -1712,10 +1740,17 @@ PX4FMU::pwm_ioctl(file *filp, int cmd, unsigned long arg)
 				} else if (pwm->values[i] > PWM_HIGHEST_MIN) {
 					_min_pwm[i] = PWM_HIGHEST_MIN;
 
-				} else if (pwm->values[i] < PWM_LOWEST_MIN) {
-					_min_pwm[i] = PWM_LOWEST_MIN;
+				}
 
-				} else {
+#if PWM_LOWEST_MIN > 0
+
+				else if (pwm->values[i] < PWM_LOWEST_MIN) {
+					_min_pwm[i] = PWM_LOWEST_MIN;
+				}
+
+#endif
+
+				else {
 					_min_pwm[i] = pwm->values[i];
 				}
 			}
@@ -2017,7 +2052,7 @@ PX4FMU::pwm_ioctl(file *filp, int cmd, unsigned long arg)
 			break;
 		}
 
-#ifdef RC_SERIAL_PORT
+#ifdef GPIO_SPEKTRUM_PWR_EN
 
 	case DSM_BIND_START:
 		/* only allow DSM2, DSM-X and DSM-X with more than 7 channels */
@@ -2960,6 +2995,9 @@ fmu_main(int argc, char *argv[])
 	if (!strcmp(verb, "mode_gpio")) {
 		new_mode = PORT_FULL_GPIO;
 
+	} else if (!strcmp(verb, "mode_rcin")) {
+		exit(0);
+
 	} else if (!strcmp(verb, "mode_pwm")) {
 		new_mode = PORT_FULL_PWM;
 
@@ -3050,12 +3088,16 @@ fmu_main(int argc, char *argv[])
 		exit(0);
 	}
 
-	fprintf(stderr, "FMU: unrecognised command %s, try:\n", verb);
+	fprintf(stderr, "FMU: unrecognized command %s, try:\n", verb);
+#if defined(RC_SERIAL_PORT)
+	fprintf(stderr, " mode_rcin");
+#endif
 #if defined(BOARD_HAS_MULTI_PURPOSE_GPIO)
 	fprintf(stderr,
-		"  mode_gpio, mode_serial, mode_pwm, mode_gpio_serial, mode_pwm_serial, mode_pwm_gpio, test, fake, sensor_reset, id\n");
+		" , mode_gpio, mode_serial, mode_pwm, mode_gpio_serial, mode_pwm_serial, mode_pwm_gpio, test, fake, sensor_reset, id\n");
 #elif defined(BOARD_HAS_PWM) && BOARD_HAS_PWM >= 6
-	fprintf(stderr, "  mode_gpio, mode_pwm, mode_pwm4, test, sensor_reset [milliseconds], i2c <bus> <hz>\n");
+	fprintf(stderr, " mode_gpio, mode_pwm, mode_pwm4, test, sensor_reset [milliseconds], i2c <bus> <hz>\n");
 #endif
+	fprintf(stderr, "\n");
 	exit(1);
 }
