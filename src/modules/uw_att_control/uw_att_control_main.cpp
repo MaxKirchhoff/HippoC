@@ -43,75 +43,259 @@
  */
 
 #include <px4_config.h>
+#include <px4_defines.h>
 #include <px4_tasks.h>
 #include <px4_posix.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <errno.h>
 #include <math.h>
 #include <poll.h>
-#include <time.h>
 #include <drivers/drv_hrt.h>
+#include <arch/board/board.h>
 #include <uORB/uORB.h>
 #include <uORB/topics/vehicle_attitude.h>
-#include <uORB/topics/manual_control_setpoint.h>
+#include <uORB/topics/vehicle_rates_setpoint.h>
 #include <uORB/topics/actuator_controls.h>
 #include <uORB/topics/parameter_update.h>
 #include <systemlib/param/param.h>
-#include <systemlib/pid/pid.h>
-#include <geo/geo.h>
+#include <systemlib/err.h>
 #include <systemlib/perf_counter.h>
 #include <systemlib/systemlib.h>
-#include <systemlib/err.h>
+#include <systemlib/circuit_breaker.h>
+#include <lib/mathlib/mathlib.h>
+#include <geo/geo.h>
 
 
 /* Prototypes */
 
 /**
- * Daemon management function.
+ * Underwater attitude control app start / stop handling function
  *
- * This function allows to start / stop the background task (daemon).
- * The purpose of it is to be able to start the controller on the
- * command line, query its status and stop it, without giving up
- * the command line to one particular process or the need for bg/fg
- * ^Z support by the shell.
+ * @ingroup apps
  */
 extern "C" __EXPORT int uw_att_control_main(int argc, char *argv[]);
 
-struct params {
-    float roll_p;
-    float roll_d;
+class UnderwaterAttitudeControl {
+public:
+    /**
+     * Constructor
+     */
+    UnderwaterAttitudeControl();
+
+    /**
+     * Destructor, also kills the main task
+     */
+    ~UnderwaterAttitudeControl();
+
+    /**
+     * Start the underwater attitude control task.
+     *
+     * @return		OK on success.
+     */
+    int		start();
+
+private:
+
+    bool	_task_should_exit;		/**< if true, task_main() should exit */
+    int		_control_task;			/**< task handle */
+
+    int		_v_rates_sp_sub;		/**< vehicle rates setpoint subscription */
+    int		_params_sub;			/**< parameter updates subscription */
+    int     _v_att_sub;             /**< vehicle attitude subscription */
+
+    orb_advert_t	_actuators_0_pub;		/**< attitude actuator controls publication */
+
+
+    struct vehicle_rates_setpoint_s		_v_rates_sp;		/**< vehicle rates setpoint */
+    struct actuator_controls_s			_actuators;			/**< actuator controls */
+    struct vehicle_attitude_s           _v_att;             /**< vehicle attitude */
+
+
+    perf_counter_t	_loop_perf;			/**< loop performance counter */
+    perf_counter_t	_controller_latency_perf;
+
+    math::Vector<3>		_rates_prev;	/**< angular rates on previous step */
+    math::Vector<3>		_rates_sp_prev; /**< previous rates setpoint */
+    math::Vector<3>		_rates_sp;		/**< angular rates setpoint */
+    math::Vector<3>		_rates_int;		/**< angular rates integral error */
+    float				_thrust_sp;		/**< thrust setpoint */
+    math::Vector<3>		_att_control;	/**< attitude control vector */
+
+    math::Matrix<3, 3>  _I;				/**< identity matrix */
+
+    struct {
+        param_t roll_p;
+        param_t roll_rate_p;
+    }		_params_handles;		/**< handles for interesting parameters */
+
+    struct {
+        float roll_p;
+        float roll_rate_p;
+    }		_params;
+
+
+
+    /**
+     * Update our local parameter cache.
+     */
+    int			parameters_update();
+
+    /**
+     * Check for parameter update and handle it.
+     */
+    void		parameter_update_poll();
+
+    /**
+     * Check for rates setpoint updates.
+     */
+    void		vehicle_rates_setpoint_poll();
+
+
+    /**
+     * Attitude controller.
+     */
+    void		control_attitude();
+
+
+    /**
+     * Check for vehicle motor limits status.
+     */
+    void		vehicle_motor_limits_poll();
+
+    /**
+     * Shim for calling task_main from task_create.
+     */
+    static void	task_main_trampoline(int argc, char *argv[]);
+
+    /**
+     * Main attitude control task.
+     */
+    void		task_main();
 };
 
-struct param_handles {
-    param_t roll_p;
-    param_t roll_d;
-};
+namespace uw_att_control
+{
 
-/**
- * Initialize all parameter handles and values
- *
- */
-int parameters_init(struct param_handles *h);
+UnderwaterAttitudeControl	*g_control;
+}
 
-/**
- * Update all parameters
- *
- */
-int parameters_update(const struct param_handles *h, struct params *p);
 
-/**
- * Mainloop of daemon.
- */
-int uw_att_control_thread_main(int argc, char *argv[]);
 
-/**
- * Print the correct usage.
- */
-static void usage(const char *reason);
+UnderwaterAttitudeControl::UnderwaterAttitudeControl() :
+
+    _task_should_exit(false),
+    _control_task(-1),
+
+    /* subscriptions */
+    _v_rates_sp_sub(-1),
+    _params_sub(-1),
+    _v_att_sub(-1),
+
+    /* publications */
+
+    _actuators_0_pub(nullptr),
+
+
+
+    /* performance counters */
+    _loop_perf(perf_alloc(PC_ELAPSED, "uw_att_control")),
+    _controller_latency_perf(perf_alloc_once(PC_ELAPSED, "ctrl_latency"))
+
+{
+
+    memset(&_v_rates_sp, 0, sizeof(_v_rates_sp));
+    memset(&_actuators, 0, sizeof(_actuators));
+    memset(&_v_att, 0, sizeof(_v_att));
+
+
+
+
+    _rates_prev.zero();
+    _rates_sp.zero();
+    _rates_sp_prev.zero();
+    _rates_int.zero();
+    _thrust_sp = 0.0f;
+    _att_control.zero();
+
+    _I.identity();
+
+    _params_handles.roll_p			= 	param_find("UW_ROLL_P");
+    _params_handles.roll_rate_p		= 	param_find("UW_ROLL_RATE_P");
+
+
+
+    /* fetch initial parameter values */
+    parameters_update();
+
+}
+
+UnderwaterAttitudeControl::~UnderwaterAttitudeControl()
+{
+    if (_control_task != -1) {
+        /* task wakes up every 100ms or so at the longest */
+        _task_should_exit = true;
+
+        /* wait for a second for the task to quit at our request */
+        unsigned i = 0;
+
+        do {
+            /* wait 20ms */
+            usleep(20000);
+
+            /* if we have given up, kill it */
+            if (++i > 50) {
+                px4_task_delete(_control_task);
+                break;
+            }
+        } while (_control_task != -1);
+    }
+
+
+    uw_att_control::g_control = nullptr;
+}
+
+
+
+int UnderwaterAttitudeControl::parameters_update()
+{
+    param_get(_params_handles.roll_p, &(_params.roll_p));
+    param_get(_params_handles.roll_rate_p, &(_params.roll_p));
+
+    return OK;
+}
+
+void UnderwaterAttitudeControl::parameter_update_poll()
+{
+    bool updated;
+
+    /* Check if parameters have changed */
+    orb_check(_params_sub, &updated);
+
+    if (updated) {
+        /* read from param to clear updated flag (uORB API requirement) */
+        struct parameter_update_s param_update;
+        orb_copy(ORB_ID(parameter_update), _params_sub, &param_update);
+        
+        parameters_update();
+    }
+}
+
+void UnderwaterAttitudeControl::vehicle_rates_setpoint_poll()
+{
+	/* check if there is a new rates setpoint */
+	bool updated;
+	orb_check(_v_rates_sp_sub, &updated);
+
+	if (updated) {
+		orb_copy(ORB_ID(vehicle_rates_setpoint), _v_rates_sp_sub, &_v_rates_sp);
+	}
+}
+
+
+
 
 /**
  * Control roll angle.
@@ -119,36 +303,12 @@ static void usage(const char *reason);
  * Roll is controlled to zero everything else remains uncontrolled (only for manual flight).
  *
  */
-void control_attitude(struct vehicle_attitude_s *att, struct actuator_controls_s *actuators,
-                      struct manual_control_setpoint_s *manual_sp);
-
-/* Variables */
-static bool thread_should_exit = false;		/**< Daemon exit flag */
-static bool thread_running = false;		/**< Daemon status flag */
-static int deamon_task;				/**< Handle of deamon task / thread */
-static struct params pp;
-static struct param_handles ph;
-
-int parameters_init(struct param_handles *h)
+void UnderwaterAttitudeControl::control_attitude()
 {
-    /* PD parameters */
-    h->roll_p 	=	param_find("UW_ROLL_P");
-    h->roll_d 	=	param_find("UW_ROLL_D");
-
-    return OK;
-}
-
-int parameters_update(const struct param_handles *h, struct params *p)
-{
-    param_get(h->roll_p, &(p->roll_p));
-    param_get(h->roll_d, &(p->roll_d));
-
-    return OK;
-}
-
-void control_attitude( struct vehicle_attitude_s *att, struct actuator_controls_s *actuators,
-                       struct manual_control_setpoint_s *manual_sp)
-{
+    vehicle_rates_setpoint_poll();
+    
+       
+    
     /*
      * Control Group 0 (attitude):
      *
@@ -160,240 +320,200 @@ void control_attitude( struct vehicle_attitude_s *att, struct actuator_controls_
      *    ...
      */
 
-    /*
-     * Calculate roll error and apply PD gain
-     */
 
-    float pcontrol = (0.0f - att->roll) * pp.roll_p;
-    float dcontrol = (0.0f - att->rollspeed) * pp.roll_d;
-    float pd_control = pcontrol + dcontrol;
+     // Calculate roll error and apply PD gain
+
+
+    float p_control = (0.0f - _v_att.roll) * _params.roll_p;
+    float d_control = (0.0f - _v_att.rollspeed) * _params.roll_rate_p;
+    float pd_control = p_control + d_control;
 
     /* set actuator outputs*/
-    actuators->control[0] = pd_control;
-    actuators->control[1] = manual_sp->x;
-    actuators->control[2] = manual_sp->y;
-    actuators->control[3] = (manual_sp->z - 0.5f) * 2.0f; //z range: 0...+1 needs to be adjusted
 
+    _att_control(0) = (int(_v_rates_sp.roll*100) == 0) ? pd_control : _v_rates_sp.roll; // <-- choose one
+    //_att_control(0) = _v_rates_sp.roll;                                                 // <-- choose one
+    _att_control(1) = _v_rates_sp.pitch;
+    _att_control(2) = _v_rates_sp.yaw;
+    _thrust_sp = _v_rates_sp.thrust;
 
-    actuators->timestamp = hrt_absolute_time();
 }
 
-/* Main Thread */
-int uw_att_control_thread_main(int argc, char *argv[])
+
+
+void UnderwaterAttitudeControl::task_main_trampoline(int argc, char *argv[])
 {
-    /* read arguments */
-    bool verbose = false;
+    uw_att_control::g_control->task_main();
+}
 
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
-            verbose = true;
-        }
-    }
 
-    /* initialize parameters, first the handles, then the values */
-    parameters_init(&ph);
-    parameters_update(&ph, &pp);
+void UnderwaterAttitudeControl::task_main()
+{
 
     /*
-     * Declare and safely initialize all structs to zero.
-     *
+     * do subscriptions
      */
-    struct vehicle_attitude_s att;
-    memset(&att, 0, sizeof(att));
-    struct manual_control_setpoint_s manual_sp;
-    memset(&manual_sp, 0, sizeof(manual_sp));
-
-   /* output structs - this is what is sent to the mixer */
-    struct actuator_controls_s actuators;
-    memset(&actuators, 0, sizeof(actuators));
+    _v_att_sub = orb_subscribe(ORB_ID(vehicle_attitude));
+    _v_rates_sp_sub = orb_subscribe(ORB_ID(vehicle_rates_setpoint));
+    _params_sub = orb_subscribe(ORB_ID(parameter_update));
 
 
-   /* publish actuator controls with zero values */
-    for (unsigned i = 0; i < (sizeof(actuators.control) / sizeof(actuators.control[0])); i++) {
-        actuators.control[i] = 0.0f;
-    }
+    /* initialize parameters cache */
+    parameters_update();
 
-    /*
-     * Advertise that this controller will publish actuator
-     * control values and the rate setpoint
-     */
-    orb_advert_t actuator_pub = orb_advertise(ORB_ID_VEHICLE_ATTITUDE_CONTROLS, &actuators);
+    /* advertise actuator controls */
+    _actuators_0_pub = orb_advertise(ORB_ID(actuator_controls_0), &_actuators);
 
-  /* subscribe to topics. */
-    int att_sub = orb_subscribe(ORB_ID(vehicle_attitude));
+    /* wakeup source: vehicle attitude */
+    px4_pollfd_struct_t fds[1];
 
-    int manual_sp_sub = orb_subscribe(ORB_ID(manual_control_setpoint));
-
-    int param_sub = orb_subscribe(ORB_ID(parameter_update));
-
-  /* Setup of loop */
-
-    struct pollfd fds[2];
-
-    fds[0].fd = att_sub;
-
+    fds[0].fd = _v_att_sub;
     fds[0].events = POLLIN;
 
-    fds[1].fd = param_sub;
+    while (!_task_should_exit) {
 
-    fds[1].events = POLLIN;
+        /* wait for up to 100ms for data */
+        int pret = px4_poll(&fds[0], (sizeof(fds) / sizeof(fds[0])), 100);
 
-
-    while (!thread_should_exit) {
-
-        /*
-         * Wait for a sensor or param update, check for exit condition every 500 ms.
-         * This means that the execution will block here without consuming any resources,
-         * but will continue to execute the very moment a new attitude measurement or
-         * a param update is published. So no latency in contrast to the polling
-         * design pattern (do not confuse the poll() system call with polling).
-         *
-         * This design pattern makes the controller also agnostic of the attitude
-         * update speed - it runs as fast as the attitude updates with minimal latency.
-         */
-        int ret = poll(fds, 2, 500);
-
-        if (ret < 0) {
-            /*
-             * Poll error, this will not really happen in practice,
-             * but its good design practice to make output an error message.
-             */
-            warnx("poll error");
-
-        } else if (ret == 0) {
-            /* no return value = nothing changed for 500 ms, ignore */
-            warnx("nothing changed");
-        } else {
-
-            /* only update parameters if they changed */
-            if (fds[1].revents & POLLIN) {
-                /* read from param to clear updated flag (uORB API requirement) */
-                struct parameter_update_s update;
-                orb_copy(ORB_ID(parameter_update), param_sub, &update);
-
-                /* if a param update occured, re-read our parameters */
-                parameters_update(&ph, &pp);
-            }
-
-            /* only run controller if attitude changed */
-            if (fds[0].revents & POLLIN) {
-
-
-                /* Check if there is a new position measurement or position setpoint */
-                bool manual_sp_updated;
-                orb_check(manual_sp_sub, &manual_sp_updated);
-
-                if (manual_sp_updated)
-                    /* get the RC (or otherwise user based) input */
-                {
-                    orb_copy(ORB_ID(manual_control_setpoint), manual_sp_sub, &manual_sp);
-                }
-
-                /* get a local copy of attitude */
-                orb_copy(ORB_ID(vehicle_attitude), att_sub, &att);
-
-
-                /* control attitude */
-
-                control_attitude(&att, &actuators, &manual_sp);
-
-               /* sanity check and publish actuator outputs */
-                if (isfinite(actuators.control[0]) &&
-                    isfinite(actuators.control[1]) &&
-                    isfinite(actuators.control[2]) &&
-                    isfinite(actuators.control[3])) {
-                    orb_publish(ORB_ID_VEHICLE_ATTITUDE_CONTROLS, actuator_pub, &actuators);
-
-                    if (verbose) {
-                        warnx("published");
-                    }
-                }
-            }
+        /* timed out - periodic check for _task_should_exit */
+        if (pret == 0) {
+            continue;
         }
+
+        /* this is undesirable but not much we can do - might want to flag unhappy status */
+        if (pret < 0) {
+            warn("mc att ctrl: poll error %d, %d", pret, errno);
+            /* sleep a bit before next try */
+            usleep(100000);
+            continue;
+        }
+
+        perf_begin(_loop_perf);
+
+        /* run controller on attitude changes */
+        if (fds[0].revents & POLLIN) {
+
+            // calculate dt
+            /**
+            static uint64_t last_run = 0;
+            float dt = (hrt_absolute_time() - last_run) / 1000000.0f;
+            last_run = hrt_absolute_time();
+
+            // guard against too small (< 2ms) and too large (> 20ms) dt's
+            if (dt < 0.002f) {
+                dt = 0.002f;
+
+            } else if (dt > 0.02f) {
+                dt = 0.02f;
+            }
+            **/
+
+            /* copy attitude and control state topics */
+            orb_copy(ORB_ID(vehicle_attitude), _v_att_sub, &_v_att);
+
+            /* check for updates in other topics */
+            parameter_update_poll();
+
+            /* start controler */
+            control_attitude();
+
+
+            /* publish actuator controls */
+            _actuators.control[0] = (PX4_ISFINITE(_att_control(0))) ? _att_control(0) : 0.0f;
+            _actuators.control[1] = (PX4_ISFINITE(_att_control(1))) ? _att_control(1) : 0.0f;
+            _actuators.control[2] = (PX4_ISFINITE(_att_control(2))) ? _att_control(2) : 0.0f;
+            _actuators.control[3] = (PX4_ISFINITE(_thrust_sp)) ? _thrust_sp : 0.0f;
+            _actuators.timestamp = hrt_absolute_time();
+            _actuators.timestamp_sample = _v_att.timestamp;
+
+            orb_publish(ORB_ID(actuator_controls_0), _actuators_0_pub, &_actuators);
+
+
+            perf_end(_controller_latency_perf);
+        }
+
+        perf_end(_loop_perf);
     }
 
-    warnx("exiting, stopping all motors.");
-    thread_running = false;
-
-    /* kill all outputs */
-    for (unsigned i = 0; i < (sizeof(actuators.control) / sizeof(actuators.control[0])); i++) {
-        actuators.control[i] = 0.0f;
-    }
-
-    actuators.timestamp = hrt_absolute_time();
-
-    orb_publish(ORB_ID_VEHICLE_ATTITUDE_CONTROLS, actuator_pub, &actuators);
-
-    fflush(stdout);
-
-    return 0;
+    _control_task = -1;
+    return;
 }
 
-/* Startup Functions */
 
-static void
-usage(const char *reason)
+
+int UnderwaterAttitudeControl::start()
 {
-    if (reason) {
-        fprintf(stderr, "%s\n", reason);
+    ASSERT(_control_task == -1);
+
+    /* start the task */
+    _control_task = px4_task_spawn_cmd("uw_att_control",
+                       SCHED_DEFAULT,
+                       SCHED_PRIORITY_MAX - 5,
+                       1500,
+                       (px4_main_t)&UnderwaterAttitudeControl::task_main_trampoline,
+                       nullptr);
+
+    if (_control_task < 0) {
+        warn("task start failed");
+        return -errno;
     }
 
-    fprintf(stderr, "usage: uw_att_control {start|stop|status}\n\n");
-    exit(1);
+    return OK;
 }
 
-/**
- * The daemon app only briefly exists to start
- * the background job. The stack size assigned in the
- * Makefile does only apply to this management task.
- *
- * The actual stack size should be set in the call
- * to px4_task_spawn_cmd().
- */
+
 int uw_att_control_main(int argc, char *argv[])
 {
     if (argc < 2) {
-        usage("missing command");
+        warnx("usage: uw_att_control {start|stop|status}");
+        return 1;
     }
 
     if (!strcmp(argv[1], "start")) {
 
-        if (thread_running) {
-            warnx("running");
-            /* this is not an error */
-            exit(0);
+        if (uw_att_control::g_control != nullptr) {
+            warnx("already running");
+            return 1;
         }
 
-        thread_should_exit = false;
-        deamon_task = px4_task_spawn_cmd("uw_att_control",
-                         SCHED_DEFAULT,
-                         SCHED_PRIORITY_MAX - 20,
-                         2048,
-                         uw_att_control_thread_main,
-                         (argv) ? (char *const *)&argv[2] : (char *const *)NULL);
-        thread_running = true;
-        exit(0);
+        uw_att_control::g_control = new UnderwaterAttitudeControl;
+
+        if (uw_att_control::g_control == nullptr) {
+            warnx("alloc failed");
+            return 1;
+        }
+
+        if (OK != uw_att_control::g_control->start()) {
+            delete uw_att_control::g_control;
+            uw_att_control::g_control = nullptr;
+            warnx("start failed");
+            return 1;
+        }
+
+        return 0;
     }
 
     if (!strcmp(argv[1], "stop")) {
-        thread_should_exit = true;
-        exit(0);
+        if (uw_att_control::g_control == nullptr) {
+            warnx("not running");
+            return 1;
+        }
+
+        delete uw_att_control::g_control;
+        uw_att_control::g_control = nullptr;
+        return 0;
     }
 
     if (!strcmp(argv[1], "status")) {
-        if (thread_running) {
+        if (uw_att_control::g_control) {
             warnx("running");
+            return 0;
 
         } else {
-            warnx("not started");
+            warnx("not running");
+            return 1;
         }
-
-        exit(0);
     }
 
-    usage("unrecognized command");
-    exit(1);
+    warnx("unrecognized command");
+    return 1;
 }
-
-
-
