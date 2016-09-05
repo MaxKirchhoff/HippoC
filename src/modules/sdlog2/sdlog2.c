@@ -977,7 +977,12 @@ int sdlog2_thread_main(int argc, char *argv[])
 	flag_system_armed = false;
 
 #ifdef __PX4_NUTTX
-	/* work around some stupidity in NuttX's task_create's argv handling */
+	/* the NuttX optarg handler does not
+	 * ignore argv[0] like the POSIX handler
+	 * does, nor does it deal with non-flag
+	 * verbs well. So we Remove the application
+	 * name and the verb.
+	 */
 	argc -= 2;
 	argv += 2;
 #endif
@@ -1121,7 +1126,6 @@ int sdlog2_thread_main(int argc, char *argv[])
 	}
 
 	if (check_free_space() != OK) {
-		PX4_WARN("ERR: MicroSD almost full");
 		return 1;
 	}
 
@@ -2354,7 +2358,7 @@ int check_free_space()
 	/* use statfs to determine the number of blocks left */
 	FAR struct statfs statfs_buf;
 	if (statfs(mountpoint, &statfs_buf) != OK) {
-		PX4_WARN("ERR: statfs");
+		mavlink_and_console_log_critical(&mavlink_log_pub, "[blackbox] no microSD card, disabling logging");
 		return PX4_ERROR;
 	}
 

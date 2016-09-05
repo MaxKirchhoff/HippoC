@@ -983,6 +983,8 @@ Sensors::parameters_update()
 		_parameters.battery_v_div = 5.7013919372f;
 #elif defined (CONFIG_ARCH_BOARD_SITL)
 		_parameters.battery_v_div = 10.177939394f;
+#elif defined (CONFIG_ARCH_BOARD_TAP_V1)
+		_parameters.battery_v_div = 9.0f;
 #else
 		/* ensure a missing default trips a low voltage lockdown */
 		_parameters.battery_v_div = 0.0f;
@@ -1353,19 +1355,18 @@ Sensors::vehicle_control_mode_poll()
 	if (vcontrol_mode_updated) {
 
 		orb_copy(ORB_ID(vehicle_control_mode), _vcontrol_mode_sub, &vcontrol_mode);
+		_armed = vcontrol_mode.flag_armed;
 
 		/* switching from non-HIL to HIL mode */
 		if (vcontrol_mode.flag_system_hil_enabled && !_hil_enabled) {
 			_hil_enabled = true;
 			_publishing = false;
-			_armed = vcontrol_mode.flag_armed;
 
 			/* switching from HIL to non-HIL mode */
 
 		} else if (!_publishing && !_hil_enabled) {
 			_hil_enabled = false;
 			_publishing = true;
-			_armed = vcontrol_mode.flag_armed;
 		}
 	}
 }
